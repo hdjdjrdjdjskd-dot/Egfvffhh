@@ -11,6 +11,7 @@ jobs:
     steps:
 
       - name: Configure Core RDP Settings
+        shell: powershell
         run: |
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
@@ -21,13 +22,13 @@ jobs:
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "UserAuthentication" `
-            -Value 0 `
+            -Value 1 `
             -Force
 
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "SecurityLayer" `
-            -Value 0 `
+            -Value 1 `
             -Force
 
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
@@ -44,40 +45,32 @@ jobs:
 
       - name: Create RDP User
         shell: powershell
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
 
-          # Generar contraseña aleatoria
-          $charSet = @{
-              Upper   = [char[]](65..90)
-              Lower   = [char[]](97..122)
-              Number  = [char[]](48..57)
-              Special = ([char[]](33..47) +
-                         [char[]](58..64) +
-                         [char[]](91..96) +
-                         [char[]](123..126))
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+              Write-Error "El secreto RDP_PASSWORD no está configurado."
+              exit 1
           }
 
-          $rawPassword = @()
-
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-
           $securePass = ConvertTo-SecureString `
-            $password `
+            $env:RDP_PASSWORD `
             -AsPlainText `
             -Force
 
-          # Crear usuario
-          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
+          $existingUser = Get-LocalUser `
+            -Name "RDP" `
+            -ErrorAction SilentlyContinue
+
+          if ($existingUser) {
+
               Set-LocalUser `
                 -Name "RDP" `
                 -Password $securePass
-          }
-          else {
+
+          } else {
+
               New-LocalUser `
                 -Name "RDP" `
                 -Password $securePass `
@@ -94,48 +87,43 @@ jobs:
             -Member "RDP" `
             -ErrorAction SilentlyContinue
 
-          # Guardar contraseña para los siguientes pasos,
-          # pero NO mostrarla en los logs.
-          "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
-
-          Write-Host "Usuario RDP creado correctamente."
+          Write-Host "Usuario RDP configurado."
 
 
       - name: Configure Windows AutoLogon
         shell: powershell
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
 
           $Winlogon = `
             "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
 
-          # Activar AutoLogon
           Set-ItemProperty `
             -Path $Winlogon `
             -Name "AutoAdminLogon" `
             -Value "1"
 
-          # Usuario
           Set-ItemProperty `
             -Path $Winlogon `
             -Name "DefaultUserName" `
             -Value "RDP"
 
-          # Dominio/equipo local
           Set-ItemProperty `
             -Path $Winlogon `
             -Name "DefaultDomainName" `
             -Value $env:COMPUTERNAME
 
-          # Contraseña utilizada por AutoLogon
           Set-ItemProperty `
             -Path $Winlogon `
             -Name "DefaultPassword" `
             -Value $env:RDP_PASSWORD
 
-          Write-Host "AutoLogon configurado para RDP."
+          Write-Host "AutoLogon configurado."
 
 
       - name: Install Tailscale
+        shell: powershell
         run: |
 
           $tsUrl = `
@@ -174,7 +162,10 @@ jobs:
                 "$env:ProgramFiles\Tailscale\tailscale.exe" `
                 ip -4
 
-              Start-Sleep -Seconds 5
+              if (-not $tsIP) {
+                  Start-Sleep -Seconds 5
+              }
+
               $retries++
           }
 
@@ -196,7 +187,8 @@ jobs:
 
           $testResult = Test-NetConnection `
             -ComputerName $env:TAILSCALE_IP `
-            -Port 3389
+            -Port 3389 `
+            -WarningAction SilentlyContinue
 
           if (-not $testResult.TcpTestSucceeded) {
 
@@ -221,7 +213,7 @@ jobs:
           Write-Host "Username: RDP"
           Write-Host "================================"
           Write-Host ""
-          Write-Host "Password ocultada por seguridad."
+          Write-Host "La contraseña está configurada mediante GitHub Secrets."
           Write-Host ""
 
           while ($true) {
